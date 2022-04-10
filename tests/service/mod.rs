@@ -17,6 +17,7 @@ use std::{
 use async_trait::async_trait;
 use ipnetwork::IpNetwork;
 use rand::prelude::{IteratorRandom, SliceRandom};
+use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::info;
 use trust_dns_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 
@@ -48,6 +49,7 @@ pub struct ServiceConfig {
     ips: Option<Vec<&'static str>>,
     wildcard_everything: bool,
     network_filename: Option<&'static str>,
+    tls: bool,
 }
 
 impl Default for ServiceConfig {
@@ -58,11 +60,17 @@ impl Default for ServiceConfig {
             update_interval: None,
             ips: None,
             wildcard_everything: false,
+            tls: false,
         }
     }
 }
 
 impl ServiceConfig {
+    pub fn tls(mut self, tls: bool) -> Self {
+        self.tls = tls;
+        self
+    }
+
     pub fn network_filename(mut self, n: &'static str) -> Self {
         self.network_filename = Some(n);
         self
@@ -95,6 +103,21 @@ pub struct Service {
     resolvers: Resolvers,
     update_interval: Option<Duration>,
     pub listen_ips: Vec<SocketAddr>,
+    servers: Arc<Mutex<Vec<JoinHandle<Result<(), anyhow::Error>>>>>,
+    authority_func: Arc<Mutex<JoinHandle<()>>>,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        tokio::task::block_in_place(|| {
+            self.servers
+                .blocking_lock()
+                .iter()
+                .map(|x| x.abort())
+                .count();
+            self.authority_func.blocking_lock().abort();
+        })
+    }
 }
 
 impl Service {
@@ -110,7 +133,7 @@ impl Service {
                 .unwrap()
         };
 
-        let listen_ips =
+        let (listen_ips, servers, authority_func) =
             Self::create_listeners(&tn, sc.hosts, sc.update_interval, sc.wildcard_everything).await;
 
         Self {
@@ -118,6 +141,8 @@ impl Service {
             resolvers: Self::create_resolvers(listen_ips.clone()),
             listen_ips,
             update_interval: sc.update_interval,
+            servers: Arc::new(Mutex::new(servers)),
+            authority_func: Arc::new(Mutex::new(authority_func)),
         }
     }
 
@@ -158,7 +183,11 @@ impl Service {
         hosts: HostsType,
         update_interval: Option<Duration>,
         wildcard_everything: bool,
-    ) -> Vec<SocketAddr> {
+    ) -> (
+        Vec<SocketAddr>,
+        Vec<JoinHandle<Result<(), anyhow::Error>>>,
+        JoinHandle<()>,
+    ) {
         let listen_cidrs = get_listen_ips(&authtoken_path(None), &tn.network.clone().id.unwrap())
             .await
             .unwrap();
@@ -226,16 +255,24 @@ impl Service {
             hosts: None,
         };
 
-        tokio::spawn(find_members(ztauthority.clone()));
+        let authority_func = tokio::spawn(find_members(ztauthority.clone()));
         tokio::time::sleep(update_interval.add(Duration::new(3, 0))).await;
+
+        let mut servers = Vec::new();
 
         for ip in listen_ips.clone() {
             let server = Server::new(ztauthority.to_owned());
             info!("Serving {}", ip.clone());
-            tokio::spawn(server.listen(ip.ip(), Duration::new(1, 0), None, None, None));
+            servers.push(tokio::spawn(server.listen(
+                ip.ip(),
+                Duration::new(1, 0),
+                None,
+                None,
+                None,
+            )));
         }
 
-        listen_ips
+        (listen_ips, servers, authority_func)
     }
 
     pub fn any_listen_ip(self) -> IpAddr {

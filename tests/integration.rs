@@ -21,19 +21,26 @@ mod sixplane {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_battery_single_domain() {
-        let service = Service::new(ServiceConfig::default().network_filename("6plane-only")).await;
+        for tls in [true, false] {
+            let service = Service::new(
+                ServiceConfig::default()
+                    .tls(tls)
+                    .network_filename("6plane-only"),
+            )
+            .await;
 
-        let record = service.member_record();
+            let record = service.member_record();
 
-        info!("Looking up {}", record);
-        let mut listen_ips = service.listen_ips.clone();
-        listen_ips.sort();
+            info!("Looking up {}", record);
+            let mut listen_ips = service.listen_ips.clone();
+            listen_ips.sort();
 
-        for _ in 0..1000 {
-            let mut ips = service.lookup_aaaa(record.clone()).await;
-            ips.sort();
+            for _ in 0..1000 {
+                let mut ips = service.lookup_aaaa(record.clone()).await;
+                ips.sort();
 
-            assert_eq!(ips, listen_ips.clone().to_ipv6_vec());
+                assert_eq!(ips, listen_ips.clone().to_ipv6_vec());
+            }
         }
     }
 

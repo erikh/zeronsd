@@ -16,10 +16,18 @@ use std::{
 
 use async_trait::async_trait;
 use ipnetwork::IpNetwork;
+use openssl::{
+    pkey::{PKey, Private},
+    stack::Stack,
+    x509::X509,
+};
 use rand::prelude::{IteratorRandom, SliceRandom};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::info;
-use trust_dns_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use trust_dns_resolver::{
+    config::{NameServerConfig, ResolverConfig, ResolverOpts},
+    Name,
+};
 
 use zeronsd::{
     addresses::Calculator,
@@ -133,12 +141,27 @@ impl Service {
                 .unwrap()
         };
 
-        let (listen_ips, servers, authority_func) =
-            Self::create_listeners(&tn, sc.hosts, sc.update_interval, sc.wildcard_everything).await;
+        let (cert, private_key) = Self::load_certs(sc.tls).unwrap();
+
+        let (listen_ips, servers, authority_func) = Self::create_listeners(
+            &tn,
+            sc.hosts,
+            sc.update_interval,
+            sc.wildcard_everything,
+            cert.clone(),
+            private_key,
+        )
+        .await;
 
         Self {
+            resolvers: Self::create_resolvers(
+                listen_ips.clone(),
+                cert,
+                tn.member()
+                    .to_fqdn(domain_or_default(None).unwrap())
+                    .unwrap(),
+            ),
             tn: Arc::new(tn),
-            resolvers: Self::create_resolvers(listen_ips.clone()),
             listen_ips,
             update_interval: sc.update_interval,
             servers: Arc::new(Mutex::new(servers)),
@@ -146,7 +169,23 @@ impl Service {
         }
     }
 
-    fn create_resolvers(sockets: Vec<SocketAddr>) -> Resolvers {
+    fn load_certs(tls: bool) -> Result<(Option<X509>, Option<PKey<Private>>), anyhow::Error> {
+        if tls {
+            let cert = X509::from_pem(std::fs::read_to_string("test-cert.pem")?.as_bytes())?;
+            let pkey =
+                PKey::private_key_from_pem(std::fs::read_to_string("test-key.pem")?.as_bytes())?;
+
+            return Ok((Some(cert), Some(pkey)));
+        }
+
+        Ok((None, None))
+    }
+
+    fn create_resolvers(
+        sockets: Vec<SocketAddr>,
+        cert: Option<X509>,
+        member_name: Name,
+    ) -> Resolvers {
         let mut resolvers = Vec::new();
 
         for socket in sockets {
@@ -154,9 +193,21 @@ impl Service {
             resolver_config.add_search(domain_or_default(None).unwrap());
             resolver_config.add_name_server(NameServerConfig {
                 bind_addr: None,
-                socket_addr: socket,
-                protocol: trust_dns_resolver::config::Protocol::Udp,
-                tls_dns_name: None,
+                socket_addr: if cert.clone().is_some() {
+                    SocketAddr::new(socket.ip(), 853)
+                } else {
+                    socket
+                },
+                protocol: if cert.clone().is_some() {
+                    trust_dns_resolver::config::Protocol::Tls
+                } else {
+                    trust_dns_resolver::config::Protocol::Udp
+                },
+                tls_dns_name: if cert.clone().is_some() {
+                    Some(member_name.to_string())
+                } else {
+                    None
+                },
                 trust_nx_responses: true,
             });
 
@@ -183,6 +234,8 @@ impl Service {
         hosts: HostsType,
         update_interval: Option<Duration>,
         wildcard_everything: bool,
+        cert: Option<X509>,
+        private_key: Option<PKey<Private>>,
     ) -> (
         Vec<SocketAddr>,
         Vec<JoinHandle<Result<(), anyhow::Error>>>,
@@ -210,6 +263,7 @@ impl Service {
                 let ptr_authority = RecordAuthority::new(
                     cidr.to_ptr_soa_name().unwrap(),
                     cidr.to_ptr_soa_name().unwrap(),
+                    cert.clone(),
                 )
                 .await
                 .unwrap();
@@ -224,6 +278,7 @@ impl Service {
                     let ptr_authority = RecordAuthority::new(
                         cidr.to_ptr_soa_name().unwrap(),
                         cidr.to_ptr_soa_name().unwrap(),
+                        cert.clone(),
                     )
                     .await
                     .unwrap();
@@ -238,6 +293,7 @@ impl Service {
                 .to_fqdn(domain_or_default(None).unwrap().into())
                 .unwrap()
                 .into(),
+            cert.clone(),
         )
         .await
         .unwrap();
@@ -263,12 +319,17 @@ impl Service {
         for ip in listen_ips.clone() {
             let server = Server::new(ztauthority.to_owned());
             info!("Serving {}", ip.clone());
+            let ca =
+                X509::from_pem(std::fs::read_to_string("test-ca.pem").unwrap().as_bytes()).unwrap();
+            let mut stack = Stack::new().unwrap();
+            stack.push(ca).unwrap();
+
             servers.push(tokio::spawn(server.listen(
                 ip.ip(),
                 Duration::new(1, 0),
-                None,
-                None,
-                None,
+                cert.clone(),
+                Some(stack),
+                private_key.clone(),
             )));
         }
 

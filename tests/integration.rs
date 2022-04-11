@@ -4,7 +4,7 @@ mod service;
 
 #[ctor::ctor]
 fn init() {
-    init_logger(Some(tracing::Level::ERROR));
+    init_logger(Some(tracing::Level::INFO));
 }
 
 mod sixplane {
@@ -46,16 +46,11 @@ mod sixplane {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_battery_single_domain_named() {
-        let update_interval = Duration::new(2, 0);
-        let service = Service::new(
-            ServiceConfig::default()
-                .update_interval(Some(update_interval))
-                .network_filename("6plane-only"),
-        )
-        .await;
+        let service = Service::new(ServiceConfig::default().network_filename("6plane-only")).await;
         let member_record = service.member_record();
 
         service.change_name("islay").await;
+        tokio::time::sleep(Duration::new(3, 0)).await;
 
         let named_record = "islay.home.arpa.".to_string();
 

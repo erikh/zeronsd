@@ -72,7 +72,7 @@ impl Default for Launcher {
 impl Launcher {
     pub fn new_from_config(filename: &str, format: ConfigFormat) -> Result<Self, anyhow::Error> {
         let res = std::fs::read_to_string(filename)?;
-        Self::parse_format(&res, format)
+        Self::parse_format(res.as_str(), format)
     }
 
     pub fn parse_format(s: &str, format: ConfigFormat) -> Result<Self, anyhow::Error> {
@@ -101,9 +101,16 @@ impl Launcher {
             return Err(anyhow!("network ID is invalid; cannot continue"));
         }
 
-        let domain_name = domain_or_default(self.domain.as_deref())?;
+        let domain_name = domain_or_default(self.domain.as_ref())?;
         let authtoken = authtoken_path(self.secret.as_deref());
         let config = central_config(central_token(self.token.as_deref())?);
+
+        let tls_cert = if let Some(tls_cert) = self.tls_cert.clone() {
+            let pem = std::fs::read(tls_cert)?;
+            Some(X509::from_pem(pem.as_slice())?)
+        } else {
+            None
+        };
 
         info!("Welcome to ZeroNS!");
         let ips = get_listen_ips(&authtoken, &self.network_id.clone().unwrap()).await?;
@@ -134,9 +141,12 @@ impl Launcher {
 
                 if !authority_map.contains_key(&cidr) {
                     tracing::debug!("{}", cidr.to_ptr_soa_name()?);
-                    let ptr_authority =
-                        RecordAuthority::new(cidr.to_ptr_soa_name()?, cidr.to_ptr_soa_name()?)
-                            .await?;
+                    let ptr_authority = RecordAuthority::new(
+                        cidr.to_ptr_soa_name()?,
+                        cidr.to_ptr_soa_name()?,
+                        tls_cert.clone(),
+                    )
+                    .await?;
                     authority_map.insert(cidr, ptr_authority);
                 }
             }
@@ -157,16 +167,23 @@ impl Launcher {
                 if v6assign.rfc4193.unwrap_or(false) {
                     let cidr = network.clone().rfc4193().unwrap();
                     if !authority_map.contains_key(&cidr) {
-                        let ptr_authority =
-                            RecordAuthority::new(cidr.to_ptr_soa_name()?, cidr.to_ptr_soa_name()?)
-                                .await?;
+                        let ptr_authority = RecordAuthority::new(
+                            cidr.to_ptr_soa_name()?,
+                            cidr.to_ptr_soa_name()?,
+                            tls_cert.clone(),
+                        )
+                        .await?;
                         authority_map.insert(cidr, ptr_authority);
                     }
                 }
             }
 
-            let authority =
-                RecordAuthority::new(domain_name.clone().into(), member_name.clone()).await?;
+            let authority = RecordAuthority::new(
+                domain_name.clone().into(),
+                member_name.clone(),
+                tls_cert.clone(),
+            )
+            .await?;
 
             let ztauthority = ZTAuthority {
                 config,
@@ -182,23 +199,16 @@ impl Launcher {
             tokio::spawn(find_members(ztauthority.clone()));
 
             let server = Server::new(ztauthority.to_owned());
-            for ip in listen_ips {
+            for ip in listen_ips.as_slice() {
                 info!("Your IP for this network: {}", ip);
-
-                let tls_cert = if let Some(tls_cert) = self.tls_cert.clone() {
-                    let pem = std::fs::read(tls_cert)?;
-                    Some(X509::from_pem(&pem)?)
-                } else {
-                    None
-                };
 
                 let chain = if let Some(chain_cert) = self.chain_cert.clone() {
                     let pem = std::fs::read(chain_cert)?;
-                    let chain = X509::stack_from_pem(&pem)?;
+                    let chain = X509::stack_from_pem(pem.as_slice())?;
 
                     let mut stack = Stack::new()?;
-                    for cert in chain {
-                        stack.push(cert)?;
+                    for cert in chain.as_slice() {
+                        stack.push(cert.clone())?;
                     }
                     Some(stack)
                 } else {
@@ -207,16 +217,18 @@ impl Launcher {
 
                 let key = if let Some(key_path) = self.tls_key.clone() {
                     let pem = std::fs::read(key_path)?;
-                    Some(PKey::private_key_from_pem(&pem)?)
+                    Some(PKey::private_key_from_pem(pem.as_slice())?)
                 } else {
                     None
                 };
 
-                tokio::spawn(
-                    server
-                        .clone()
-                        .listen(ip, Duration::new(1, 0), tls_cert, chain, key),
-                );
+                tokio::spawn(server.clone().listen(
+                    ip.clone(),
+                    Duration::new(1, 0),
+                    tls_cert.clone(),
+                    chain,
+                    key,
+                ));
             }
 
             return Ok(ztauthority);

@@ -2,6 +2,7 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    vec,
 };
 
 use crate::traits::ToHostname;
@@ -11,16 +12,16 @@ use crate::utils::domain_or_default;
 fn test_parse_member_name() {
     use crate::utils::parse_member_name;
 
-    let actual_domains: &mut Vec<Option<&str>> =
-        &mut vec!["tld", "domain", "zerotier", "test.subdomain"]
+    let mut actual_domains: Vec<Option<String>> =
+        vec!["tld", "domain", "zerotier", "test.subdomain"]
             .iter()
-            .map(|s| Some(*s))
-            .collect::<Vec<Option<&str>>>();
+            .map(|s| Some(s.to_string()))
+            .collect::<Vec<Option<String>>>();
 
     actual_domains.push(None); // make sure the None case also gets checked
 
-    for domain in actual_domains {
-        let domain_name = domain_or_default(*domain).unwrap().clone();
+    for domain in actual_domains.as_slice() {
+        let domain_name = domain_or_default(domain.as_ref()).unwrap().clone();
 
         assert_eq!(parse_member_name(None, domain_name.clone()), None);
 
@@ -63,9 +64,9 @@ fn test_parse_ip_from_cidr() {
         ("fe80::abcd/128", "fe80::abcd"),
     ];
 
-    for (cidr, ip) in results {
+    for (cidr, ip) in results.iter() {
         assert_eq!(
-            parse_ip_from_cidr(String::from(cidr)),
+            parse_ip_from_cidr(cidr.to_string()),
             IpAddr::from_str(ip).unwrap(),
             "{}",
             cidr
@@ -85,17 +86,21 @@ fn test_domain_or_default() {
     );
 
     assert_eq!(
-        domain_or_default(Some("zerotier")).unwrap(),
+        domain_or_default(Some(&"zerotier".to_string())).unwrap(),
         Name::from_str("zerotier").unwrap()
     );
 
     assert_eq!(
-        domain_or_default(Some("zerotier.tld")).unwrap(),
+        domain_or_default(Some(&"zerotier.tld".to_string())).unwrap(),
         Name::from_str("zerotier.tld").unwrap()
     );
 
     for bad in ["bad.", "~", "!", ".", ""] {
-        assert!(domain_or_default(Some(bad)).is_err(), "{}", bad);
+        assert!(
+            domain_or_default(Some(&bad.to_string())).is_err(),
+            "{}",
+            bad
+        );
     }
 }
 

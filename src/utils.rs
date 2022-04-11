@@ -1,6 +1,7 @@
 use std::{net::IpAddr, path::Path, str::FromStr, sync::Once};
 
 use ipnetwork::IpNetwork;
+use openssl::{hash::MessageDigest, x509::X509};
 use tracing::warn;
 use trust_dns_server::client::rr::{LowerName, Name};
 use zerotier_central_api::apis::configuration::Configuration;
@@ -40,7 +41,7 @@ pub fn init_logger(level: Option<tracing::Level>) {
         };
 
         let level = if loglevel.is_some() {
-            crate::log::LevelFilter::from_str(&loglevel.unwrap())
+            crate::log::LevelFilter::from_str(loglevel.unwrap().as_str())
                 .expect("invalid log level")
                 .to_log()
         } else {
@@ -80,7 +81,7 @@ pub fn central_config(token: String) -> Configuration {
 
 // extracts the ip from the CIDR. 10.0.0.1/32 becomes 10.0.0.1
 pub fn parse_ip_from_cidr(ip_with_cidr: String) -> IpAddr {
-    IpNetwork::from_str(&ip_with_cidr)
+    IpNetwork::from_str(ip_with_cidr.as_str())
         .expect("Could not parse IP from CIDR")
         .ip()
 }
@@ -121,10 +122,10 @@ pub fn authtoken_path(arg: Option<&Path>) -> &Path {
 }
 
 // use the default tld if none is supplied.
-pub fn domain_or_default(tld: Option<&str>) -> Result<Name, anyhow::Error> {
+pub fn domain_or_default(tld: Option<&String>) -> Result<Name, anyhow::Error> {
     if let Some(tld) = tld {
         if tld.len() > 0 {
-            return Ok(Name::from_str(&format!("{}.", tld))?);
+            return Ok(Name::from_str(format!("{}.", tld).as_str())?);
         } else {
             return Err(anyhow!("Domain name must not be empty if provided."));
         }
@@ -159,7 +160,9 @@ pub async fn get_member_name(
 
     let status = zerotier_one_api::apis::status_api::get_status(&configuration).await?;
     if let Some(address) = status.address {
-        return Ok(("zt-".to_string() + &address).to_fqdn(domain_name)?.into());
+        return Ok(("zt-".to_string() + address.as_str())
+            .to_fqdn(domain_name)?
+            .into());
     }
 
     Err(anyhow!(
@@ -221,7 +224,8 @@ pub async fn update_central_dns(
     network: String,
 ) -> Result<(), anyhow::Error> {
     let mut zt_network =
-        zerotier_central_api::apis::network_api::get_network_by_id(&config, &network).await?;
+        zerotier_central_api::apis::network_api::get_network_by_id(&config, network.as_str())
+            .await?;
 
     let mut domain_name = domain_name;
     domain_name.set_fqdn(false);
@@ -234,9 +238,24 @@ pub async fn update_central_dns(
     if let Some(mut zt_network_config) = zt_network.config.to_owned() {
         zt_network_config.dns = dns;
         zt_network.config = Some(zt_network_config);
-        zerotier_central_api::apis::network_api::update_network(&config, &network, zt_network)
-            .await?;
+        zerotier_central_api::apis::network_api::update_network(
+            &config,
+            network.as_str(),
+            zt_network,
+        )
+        .await?;
     }
 
     Ok(())
+}
+
+pub fn encode_dot_name(cert: X509, member_name: Name) -> Result<Name, anyhow::Error> {
+    let mut encoded = base32::encode(
+        base32::Alphabet::RFC4648 { padding: false },
+        &cert.digest(MessageDigest::sha256())?,
+    );
+
+    encoded.as_mut_str().make_ascii_lowercase();
+    let name = format!("{}{}.{}", "dot-".to_string(), encoded, member_name);
+    Ok(Name::from_str(name.as_str())?)
 }

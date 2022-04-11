@@ -9,6 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use ipnetwork::IpNetwork;
+use openssl::x509::X509;
 use trust_dns_resolver::{
     config::NameServerConfigGroup,
     proto::rr::{dnssec::SupportedAlgorithms, rdata::SOA, RData, Record, RecordSet, RecordType},
@@ -31,7 +32,7 @@ use crate::{
     addresses::Calculator,
     hosts::{parse_hosts, HostsFile},
     traits::{ToHostname, ToPointerSOA, ToWildcard},
-    utils::parse_member_name,
+    utils::{encode_dot_name, parse_member_name},
 };
 
 pub async fn find_members(mut zt: ZTAuthority) {
@@ -256,10 +257,12 @@ impl RecordAuthority {
     pub async fn new(
         domain_name: LowerName,
         member_name: LowerName,
+        cert: Option<X509>,
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
             authority: Arc::new(
-                Self::configure_authority(domain_name.clone().into(), member_name.into()).await?,
+                Self::configure_authority(domain_name.clone().into(), member_name.into(), cert)
+                    .await?,
             ),
             domain_name,
         })
@@ -268,6 +271,7 @@ impl RecordAuthority {
     async fn configure_authority(
         domain_name: Name,
         member_name: Name,
+        cert: Option<X509>,
     ) -> Result<InMemoryAuthority, anyhow::Error> {
         let mut map = BTreeMap::new();
         let mut soa = Record::with(domain_name.clone(), RecordType::SOA, 30);
@@ -293,6 +297,13 @@ impl RecordAuthority {
         ns.set_data(Some(RData::NS(member_name.clone())));
         let mut ns_rs = RecordSet::new(&domain_name.clone(), RecordType::NS, 1);
         ns_rs.insert(ns, 1);
+
+        if let Some(cert) = cert {
+            let mut cert_ns = Record::with(domain_name.clone(), RecordType::NS, 30);
+            cert_ns.set_data(Some(RData::NS(encode_dot_name(cert, member_name)?)));
+
+            ns_rs.insert(cert_ns, 1);
+        }
 
         map.insert(
             RrKey::new(domain_name.clone().into(), RecordType::NS),

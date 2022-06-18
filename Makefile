@@ -35,14 +35,20 @@ packagedir:
 package-ubi: packagedir packages-out
 	docker build -f Dockerfile.ubi -t zeronsd-packages-ubi .
 	docker run -it -v ${PWD}:/code -w /code --rm zeronsd-packages-ubi bash -c ". /root/.cargo/env && cargo build --release && cargo generate-rpm && mv /code/target/generate-rpm/*.rpm /code/target/packages"
+	docker buildx build --platform linux/arm64/v8 -f Dockerfile.ubi -t zeronsd-packages-ubi .
+	docker buildx build --platform linux/s390x -f Dockerfile.ubi -t zeronsd-packages-ubi .
 
 package-ubuntu22: packagedir packages-out
 	docker build -f Dockerfile.ubuntu -t zeronsd-packages-ubuntu .
 	docker run -it -v ${PWD}:/code -w /code --rm zeronsd-packages-ubuntu bash -c "cargo deb --variant ubuntu22 && mv /code/target/debian/*.deb /code/target/packages"
+	docker buildx build --platform linux/arm64/v8 -f Dockerfile.ubuntu -t zeronsd-packages-ubuntu .
+	docker buildx build --platform linux/s390x -f Dockerfile.ubuntu -t zeronsd-packages-ubuntu .
 
 package-debian: packagedir packages-out
 	docker build -f Dockerfile.packages -t zeronsd-packages .
 	docker run -it -v ${PWD}:/code -w /code --rm zeronsd-packages bash -c ". /root/.cargo/env && cargo deb && mv /code/target/debian/*.deb /code/target/packages"
+	docker buildx build --platform linux/arm64/v8 -f Dockerfile.packages -t zeronsd-packages .
+	docker buildx build --platform linux/s390x -f Dockerfile.packages -t zeronsd-packages .
 
 packages: docker-image-package package-ubi package-ubuntu22 package-debian
 	make packages-out
